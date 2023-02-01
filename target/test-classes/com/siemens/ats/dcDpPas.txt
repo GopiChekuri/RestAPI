@@ -1,0 +1,246 @@
+package com.siemens.scot.generation.dclog.dcdppas;
+
+import java.util.ArrayList;
+import java.util.Comparator;
+import java.util.HashMap;
+import java.util.List;
+import java.util.Map;
+import java.util.stream.Collectors;
+
+import javax.ws.rs.BadRequestException;
+
+import org.apache.commons.lang3.StringUtils;
+import org.osgi.service.component.annotations.Component;
+import org.osgi.service.component.annotations.Reference;
+import org.osgi.service.component.annotations.ReferenceCardinality;
+import org.osgi.service.component.annotations.ReferencePolicy;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+
+import com.google.common.collect.Lists;
+import com.siemens.scot.core.common.plugin.AbstractDCLogGenerationPlugin;
+import com.siemens.scot.core.common.plugin.DCLogGenerationPlugin;
+import com.siemens.scot.core.coordinates.api.CoordinatesService;
+import com.siemens.scot.core.model.base.Seg;
+import com.siemens.scot.core.model.extended.SegmentPosition;
+import com.siemens.scot.core.topology.api.TopologyService;
+import com.siemens.scot.core.util.DcLogUtils;
+import com.siemens.scot.core.util.TopologyUtils;
+import com.siemens.scot.dao.ParamConfDAO;
+import com.siemens.scot.dao.PdDAO;
+import com.siemens.scot.dao.SegDAO;
+import com.siemens.scot.dao.TrackDAO;
+import com.siemens.scot.dao.TvdDAO;
+import com.siemens.scot.dao.ZcDAO;
+import com.siemens.scot.dao.ZtpManDAO;
+import com.siemens.scot.model.enums.ListTypesTvd;
+import com.siemens.scot.model.enums.ListYesNo;
+import com.siemens.scot.model.paramconf.ParamConf;
+import com.siemens.scot.model.pd.Pd;
+import com.siemens.scot.model.track.Track;
+import com.siemens.scot.model.tvd.Tvd;
+import com.siemens.scot.model.zc.Zc;
+import com.siemens.scot.model.ztpman.ZtpMan;
+
+/**
+ * DC LOG Dc-Dp-Pas
+ * <p>
+ * • For each PD:
+ * <p>
+ * o If the parameter [Filtrage_DP_Suivi_Pas) is "N" or if the parameter
+ * [Filtrage_DP_Suivi_Pas] is "O" then for each ZC:
+ * <p>
+ * • If the PD is managed by the ZC (table "Num_DP_Pas"):
+ * <p>
+ * {@code "DP_ID" } : name of the PD ("PD" "Name")
+ * </p>
+ * <p>
+ * {@code "PAS_ID" } : name of the ZC ("ZC" "Name")
+ * </p>
+ * <p>
+ * {@code "NUM_DP_PAS" } : PD number on the ZC
+ * </p>
+ * <p>
+ * {@code "AL_MAN_ZMS" } : if there is a ZTP_Man whose associated PD ("ZTP_Man"
+ * "associated PD") is the PD concerned and managed by the ZC (table
+ * "Num_ZTP_Man_Pas"): "TRUE", otherwise: "FALSE"
+ * </p>
+ * </p>
+ * </p>
+ * </p>
+ * </p>
+ * 
+ * 
+ */
+
+@Component(name = "dc-dp-pas", property = { "type=DC_LOG" })
+public class DcDpPas extends AbstractDCLogGenerationPlugin implements DCLogGenerationPlugin {
+
+	private static final Logger LOGGER = LoggerFactory.getLogger(DcDpPas.class);
+
+	private static final String FILE_NAME = "dc_dp_pas.csv";
+
+	private static final String TRUE = "TRUE";
+
+	private static final String FALSE = "FALSE";
+
+	private static final String N = "N";
+
+	private static final String O = "O";
+
+	private static final String Filtrage_DP_Suivi_PAS = "Filtrage_DP_Suivi_PAS";
+
+	@Reference(cardinality = ReferenceCardinality.MANDATORY, policy = ReferencePolicy.DYNAMIC)
+	private volatile PdDAO pdDAO;
+
+	@Reference(cardinality = ReferenceCardinality.MANDATORY, policy = ReferencePolicy.DYNAMIC)
+	private volatile ZcDAO zcDAO;
+
+	@Reference(cardinality = ReferenceCardinality.MANDATORY, policy = ReferencePolicy.DYNAMIC)
+	private volatile SegDAO segDAO;
+
+	@Reference(cardinality = ReferenceCardinality.MANDATORY, policy = ReferencePolicy.DYNAMIC)
+	private volatile TvdDAO tvdDAO;
+
+	@Reference(cardinality = ReferenceCardinality.MANDATORY, policy = ReferencePolicy.DYNAMIC)
+	private volatile ZtpManDAO ztpManDAO;
+
+	@Reference(cardinality = ReferenceCardinality.MANDATORY, policy = ReferencePolicy.DYNAMIC)
+	private volatile TrackDAO trackDAO;
+
+	@Reference(cardinality = ReferenceCardinality.MANDATORY, policy = ReferencePolicy.DYNAMIC)
+	private volatile ParamConfDAO paramConfDAO;
+
+	@Reference(cardinality = ReferenceCardinality.MANDATORY, policy = ReferencePolicy.DYNAMIC)
+	private volatile TopologyService topologyService;
+
+	@Reference(cardinality = ReferenceCardinality.MANDATORY, policy = ReferencePolicy.DYNAMIC)
+	private volatile CoordinatesService coordinateService;
+
+	private static final Object[] HEADERS = new Object[] { "DP_ID", "PAS_ID", "NUM_DP_PAS", "AL_MAN_ZMS" };
+
+	@Override
+	public void generateDCLogs(Map<String, Object> executionContext) {
+
+		LOGGER.debug("Generate DC LOG :  {} ", this.getClass().getName());
+
+		if (!checkValidExecutionContext(executionContext)) {
+			throw new BadRequestException();
+		}
+
+		List<Object[]> data = new ArrayList<>();
+		List<ZtpMan> ztpManList = ztpManDAO.findAll();
+		List<Pd> pdList = pdDAO.findAll();
+		List<com.siemens.scot.model.seg.Seg> baseSegList = segDAO.findAll();
+		List<Tvd> tvdList = tvdDAO.findAll();
+		List<Zc> zcList = zcDAO.findAll();
+		List<Track> trackList = trackDAO.findAll();
+		List<ParamConf> paramConfList = paramConfDAO.findAll();
+
+		ParamConf paramConf = paramConfList.stream().filter(
+				paramConfObj -> StringUtils.equalsIgnoreCase(paramConfObj.getParameterName(), Filtrage_DP_Suivi_PAS))
+				.findAny().orElse(null);
+
+		pdList.forEach(pd -> {
+			if ((null != paramConf
+					&& (O.equalsIgnoreCase(paramConf.getValue()) || N.equalsIgnoreCase(paramConf.getValue())))) {
+				zcList.forEach(zc -> {
+					if (checkIfPDIsMangedByZC(pd, zc, trackList, tvdList, baseSegList)) {
+						String dpId = pd.getName();
+						String pasId = zc.getName();
+						String alManZms = getAlManZmsColumnValue(ztpManList, pd, zc, Lists.newArrayList(baseSegList));
+						if (!StringUtils.isEmpty(dpId) && !StringUtils.isEmpty(pasId)
+								&& !StringUtils.isEmpty(alManZms)) {
+							data.add(new Object[] { dpId, pasId, null, alManZms });
+						}
+
+					}
+				});
+			}
+		});
+
+		List<Object[]> sortedList = updateNumDpPas(data);
+		sortedList.add(0, HEADERS);
+		String dcLogFolder = (String) executionContext.get(EXEC_CONTEXT_KEY_EXPORT_FOLDER);
+		DcLogUtils.saveFile(dcLogFolder, FILE_NAME, sortedList);
+		LOGGER.debug("DC_Log {} generation finished", this.getClass().getName());
+
+	}
+
+	private List<Object[]> updateNumDpPas(List<Object[]> data) {
+
+		Comparator<Object[]> dpId = Comparator.comparing(a -> null != a[0] ? a[0].toString() : null);
+		Comparator<Object[]> pasId = Comparator.comparing(a -> null != a[1] ? a[1].toString() : null);
+
+		List<Object[]> sortedDataList = data.stream().sorted(dpId.thenComparing(pasId)).collect(Collectors.toList());
+
+		HashMap<String, Integer> indexation = new HashMap<>();
+		int count = 1;
+		for (Object[] tempObj : sortedDataList) {
+			// 1st Index = PAS_ID
+			String indexationId = (String) tempObj[1];
+			if (indexation.containsKey(indexationId)) {
+				count = indexation.get(indexationId) + 1;
+			} else {
+				count = 1;
+			}
+			indexation.put(indexationId, count);
+			// 2-nd index contains column NumZauhtZmsPas
+			tempObj[2] = count;
+		}
+
+		return sortedDataList;
+
+	}
+
+	/**
+	 * <p>
+	 * if there is a ZTP_Man whose associated PD ("ZTP_Man" "associated PD") is the
+	 * PD concerned and managed by the ZC (table "Num_ZTP_Man_Pas"): "TRUE",
+	 * otherwise: "FALSE"
+	 * </p>
+	 * 
+	 * @param ztpManList
+	 * @param pd
+	 * @param zc
+	 * @param baseSegList
+	 * @return boolean
+	 */
+	private String getAlManZmsColumnValue(List<ZtpMan> ztpManList, Pd pd, Zc zc, List<Seg> baseSegList) {
+
+		ZtpMan ztpManObject = ztpManList.stream()
+				.filter(ztpMan -> StringUtils.equalsIgnoreCase(ztpMan.getAssociatedPd(), pd.getName())
+						&& ztpMan.getIdAssociatedZcList().contains(zc.getName()))
+				.findFirst().orElse(null);
+		if (null != ztpManObject) {
+			return TRUE;
+		}
+
+		return FALSE;
+	}
+
+	// Implementation of Num_DP_Pas
+	private boolean checkIfPDIsMangedByZC(Pd pd, Zc zc, List<Track> trackList, List<Tvd> tvdList,
+			List<com.siemens.scot.model.seg.Seg> segList) {
+		if (!ListYesNo.Y.equals(pd.getTrackingPd())) {
+			SegmentPosition segmentPosition = pd.getSegmentPosition();
+			com.siemens.scot.model.seg.Seg segObj = TopologyUtils.getObjectById(segmentPosition.getSegmentId(),
+					segList);
+			if (null != segObj) {
+				segmentPosition.setSegment(segObj);
+			}
+
+			if (null != segmentPosition) {
+
+				return topologyService.contains(zc, segmentPosition, Lists.newArrayList(segList));
+			}
+		} else {
+			Tvd fetchedTvdObject = tvdList.stream().filter(tvd -> ListTypesTvd.PD.equals(tvd.getType())
+					&& StringUtils.equalsIgnoreCase(pd.getName(), tvd.getObject())).findAny().orElse(null);
+			if (null != fetchedTvdObject) {
+				return topologyService.contains(zc, fetchedTvdObject, Lists.newArrayList(segList));
+			}
+		}
+		return false;
+	}
+}
